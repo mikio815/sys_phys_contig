@@ -1,0 +1,98 @@
+!システムコールの追加
+
+カーネル(linux-6.8.6, 64bitマシン想定)に次のように新しいシステムコールを追加します。
+
+まず、システムコールの本体を書きます。今回は new_syscall という名前のシステムコールを作ります。DEFINE1の1は引数の数を示しています。( ==http://softwaretechnique.jp/Linux/SystemCall/sc_02.html== http://softwaretechnique.web.fc2.com/Linux/SystemCall/sc_02.html にリンクが変わったようです -- 2025/04/30 )
+
+
+
+arch/x86/kernel/new_syscall.c
+ #include <linux/syscalls.h>
+ 
+ SYSCALL_DEFINE1(new_syscall, int, x)
+ {
+         printk("new_syscall added!!");
+         return x;
+ }
+
+次に、このソースコードをコンパイルするためのルールを Makefile に追加します。
+
+arch/x86/kernel/Makefile (6.8.6 では 48 行目付近)
+  obj-y                 := process_$(BITS).o signal.o entry_$(BITS).o
+  obj-y                 += new_syscall.o # このあたりに適当に追加
+  obj-y                 += traps.o irq.o irq_$(BITS).o dumpstack_$(BITS).o
+
+また、念のためinclude/linux/syscalls.hを編集しておきましょう。
+
+ asmlinkage long sys_kcmp(pid_t pid1, pid_t pid2, int type,unsigned long idx1, unsigned long idx2);
+ asmlinkage long sys_finit_module(int fd, const char __user *uargs, int flags);
+ asmlinkage long sys_new_syscall( int count );
+
+最後に、このシステムコールの番号を登録します。linux-6.8.6 では 461 番まで使われているので、今回は 462 番として登録します。
+
+arch/x86/entry/syscalls/syscall_64.tbl
+
+  460 common lsm_set_self_attr sys_lsm_set_self_attr
+  461 common lsm_list_modules sys_lsm_list_modules
+  462 common new_syscall         sys_new_syscall     # ファイルの最後に追加。
+
+これでシステムコールの追加は完了。カーネルをコンパイルし、コンパイルしたカーネルを[[ゲストOSに導入|Linux/コンパイルしたカーネルの導入]]します。
+
+次に、ユーザランドに次のファイルをコピーします。
+ arch/x86/include/generated/uapi/asm/unistd_64.h
+
+例えば次のようなプログラムを書いて、テストします。もちろん、このプログラムはゲスト上で動かします。
+
+次のWarningが出た場合は、#include <unistd.h> を追加してsyscall()の型定義を読み込む事で解消します。
+new_syscall.h:6:24: warning: implicit declaration of function ‘syscall -- 田中
+
+ //new_syscall.h
+ #ifndef __LINUX_NEW_SYSCALL_H
+ #define __LINUX_NEW_SYSCALL_H
+ #include "unistd_64.h"
+ #include <asm/unistd.h>
+ #define new_syscall(x) syscall(__NR_new_syscall, x)
+ #endif
+
+ //new_syscall.c
+ #include <stdio.h>
+ #include "new_syscall.h"
+ 
+ int main()
+ {
+         printf("new_syscall(10) -> %d\n",new_syscall(10));
+         return 0;
+ }
+
+うまく動きましたか？
+
+うまく動くと次のような結果が得られます。
+ watak4@watak4-virtual-machine:~/syscall_test$ gcc new_syscall.c
+ watak4@watak4-virtual-machine:~/syscall_test$ ./a.out
+ new_syscall(10) -> 10
+ watak4@watak4-virtual-machine:~/syscall_test$ dmesg | tail -n 1
+ [ 1637.465090] new_syscall added!!
+
+
+!ポインタの扱い方
+user spaceから受け取ったポインタは、kernel spaceで利用する前に検査する必要があります。
+(引数でkernel内の重要なデータのアドレスが渡ってくるかもしれない。危ない)
+
+http://www.coins.tsukuba.ac.jp/~yas/coins/os2-2011/2012-01-31/index.html#copy_from_user-copy_to_user
+
+user spaceから来たポインタは、access_ok(9)でチェックした後、copy_from_user(9),copy_to_user(9)でアクセスしましょう。
+
+ int sys_mysyscall(int *addr)
+ {
+   *addr = 42;
+   return 0;
+ }
+
+↑のコードがなぜいけないのか。
+*addrがuser spaceのアドレスであるという保証がない。kernel space内のデータを指す悪意のある呼出かもしれない。
+*addrの指す先のページが、メモリに乗っている保証がない。page faultが起こる可能性がある。
+
+!参考になりそうなページ
+*https://brennan.io/2016/11/14/kernel-dev-ep3/
+*access_ok(9) は 2019 年のコミットから 2 引数に変化した
+**https://stackoverflow.com/a/12361684
