@@ -2,6 +2,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/sched.h>
 
 #define PHYS_CONTIG_MAX_PAGES 4096
 
@@ -13,10 +14,10 @@ SYSCALL_DEFINE4(phys_contig,
 {
 	unsigned long uaddr = (unsigned long)vaddr;
 	unsigned long start = uaddr & PAGE_MASK;
-	unsigned long end, npages, nbits, nbytes;
+	unsigned long end, npages, nbits, nbytes, i;
 	struct page **pages;
 	u8 *kbuf;
-	long ret;
+	long pinned, ret;
 
 	if (len == 0)
 		return -EINVAL;
@@ -49,11 +50,33 @@ SYSCALL_DEFINE4(phys_contig,
 		goto out_free_pages;
 	}
 
+	mmap_read_lock(current->mm);
+	pinned = get_user_pages(start, npages, 0, pages);
+	mmap_read_unlock(current->mm);
+
+	if (pinned < 0) {
+		ret = pinned;
+		goto out_free_buf;
+	}
+	if (pinned != npages) {
+		ret = -EFAULT;
+		goto out_put;
+	}
+
+	for (i = 0; i < nbits; i++) {
+		if (page_to_pfn(pages[i + 1]) == page_to_pfn(pages[i]) + 1)
+			kbuf[i >> 3] |= 1u << (i & 7);
+	}
+
 	if (copy_to_user(out, kbuf, nbytes))
 		ret = -EFAULT;
 	else
 		ret = 0;
 
+out_put:
+	while (pinned--)
+		put_page(pages[pinned]);
+out_free_buf:
 	kfree(kbuf);
 out_free_pages:
 	kfree(pages);
